@@ -181,6 +181,69 @@ func TestPruneTombstonesInFinishedAtOrder(t *testing.T) {
 	require.Empty(t, mgr.tombstones)
 }
 
+// TestExecTimeoutWellBehavedExecutorFailsWithTimeoutMessage pins a second Kody
+// finding: an executor that RESPECTS context cancellation (returns ctx.Err()
+// promptly when runCtx is done) races the ExecTimeout watchdog for m.mu at
+// timeout. The completion path must record the outcome deterministically as
+// UploadStateFailed with execTimeoutMessage — never UploadStateCancelled (the
+// old errors.Is(err, context.Canceled) mapping fired for watchdog-driven
+// cancellation too) and never a raw "context deadline exceeded" error.
+// Because the outcome depends on goroutine scheduling (which of the completion
+// goroutine and the watchdog wins the lock), this is verified statistically:
+// many short-ExecTimeout iterations, EVERY one must land on the uniform
+// timeout failure. (Unlike TestExecTimeoutWatchdogFailsHungTask, the executor
+// here returns promptly instead of hanging forever.)
+func TestExecTimeoutWellBehavedExecutorFailsWithTimeoutMessage(t *testing.T) {
+	const iterations = 100
+	for i := 0; i < iterations; i++ {
+		started := make(chan struct{}, 1)
+		mgr := NewUploadTaskManager(func(ctx context.Context, _ io.Reader, _ int64, _ string, _ bool, _ string, _ bool) (any, error) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			// Well-behaved: unblock as soon as runCtx is cancelled (by the
+			// ExecTimeout deadline or the watchdog cancel) and surface the
+			// context error, exactly like a cancellation-aware uploader.
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}, time.Hour)
+		mgr.ExecTimeout = 20 * time.Millisecond
+
+		id, err := mgr.Start(context.Background(), io.NopCloser(strings.NewReader("x")), 1, "respects-ctx.bin", false)
+		require.NoError(t, err)
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: the executor never started", i)
+		}
+
+		// Wait for the task to reach ANY terminal state, then assert the
+		// outcome is the uniform timeout failure.
+		var task *UploadTask
+		var gerr error
+		require.Eventually(t, func() bool {
+			task, gerr = mgr.Get(id)
+			if gerr != nil {
+				return false
+			}
+			switch task.State {
+			case UploadStateCompleted, UploadStateFailed, UploadStateCancelled:
+				return true
+			}
+			return false
+		}, 2*time.Second, 2*time.Millisecond,
+			"iteration %d: the task must reach a terminal state after ExecTimeout", i)
+
+		require.Equal(t, UploadStateFailed, task.State,
+			"iteration %d: a cancellation-respecting executor at ExecTimeout must always end FAILED, not %s (empty err=%q)",
+			i, task.State, task.Err)
+		require.Equal(t, execTimeoutMessage, task.Err,
+			"iteration %d: the recorded error must be the uniform exec-timeout message, never a raw context error",
+			i)
+	}
+}
+
 // tombstoneKeys lists the ids in a tombstone map (test helper).
 func tombstoneKeys(m map[string]*UploadTask) []string {
 	out := make([]string, 0, len(m))

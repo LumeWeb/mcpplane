@@ -501,10 +501,31 @@ func (m *UploadTaskManager) spawn(tt *trackedTask, runCtx context.Context, reade
 			task.Result = result
 			task.FinishedAt = &finished
 			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					task.State = UploadStateCancelled
-					task.Err = ""
-				} else {
+				// Deterministic rule: an ExecTimeout expiry must ALWAYS end as
+				// Failed+execTimeoutMessage regardless of which path grabs m.mu
+				// first. Explicit user Cancel sets UploadStateCancelled under
+				// m.mu BEFORE calling cancel(), so State==Cancelled here means
+				// a real user cancel; a context error with any other recorded
+				// state can only come from runCtx's ExecTimeout deadline or the
+				// watchdog cancel — never map that to Cancelled.
+				switch {
+				case errors.Is(err, context.DeadlineExceeded):
+					// runCtx's WithTimeout expired: the ExecTimeout outcome.
+					task.State = UploadStateFailed
+					task.Err = execTimeoutMessage
+				case errors.Is(err, context.Canceled):
+					if task.State == UploadStateCancelled {
+						// Explicit user Cancel (Cancel() set the state before
+						// cancel()): the ctx-cancel→Cancelled mapping applies.
+						task.State = UploadStateCancelled
+						task.Err = ""
+					} else {
+						// Cancellation from the ExecTimeout watchdog, not a
+						// user cancel: record the uniform timeout failure.
+						task.State = UploadStateFailed
+						task.Err = execTimeoutMessage
+					}
+				default:
 					task.State = UploadStateFailed
 					task.Err = err.Error()
 				}
