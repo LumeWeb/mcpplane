@@ -215,6 +215,37 @@ func TestClaimSingleUse(t *testing.T) {
 	require.Equal(t, ReasonUsed, reason)
 }
 
+// TestMintWithLoggerDoesNotDeadlock pins the non-reentrancy landmine: Mint
+// mutated h.items under h.mu and then called Logf, which also acquires h.mu.
+// A regression there hangs every one-time hand-off mint (oob login, seed drop,
+// restore). Run Mint in a goroutine and t.Fatalf on timeout so a regression is
+// caught as a failure, not a hung test. A logger IS set via WithLogger so the
+// real Logf path (double h.mu acquisition in the bug) executes.
+func TestMintWithLoggerDoesNotDeadlock(t *testing.T) {
+	h := New("testflow", &stubHandler{}, time.Minute)
+	defer h.Stop(context.Background())
+	h.WithLogger(zap.NewNop().With(zap.String("ep", "test")))
+	// Base-URL mode keeps EnsureLoopback a no-op, so the test is hermetic.
+	h.SetBaseURL("https://tunnel.example.dev")
+
+	minted := make(chan string, 1)
+	go func() { minted <- h.Mint(map[string]any{"payload": true}) }()
+
+	select {
+	case url := <-minted:
+		wantPrefix := "https://tunnel.example.dev/testflow/"
+		require.True(t, strings.HasPrefix(url, wantPrefix),
+			"Mint must return a valid one-time URL, got %q", url)
+		token := strings.TrimPrefix(url, wantPrefix)
+		require.NotEmpty(t, token, "Mint must mint a token in the URL path")
+		item, reason := h.Resolve(token)
+		require.NotNil(t, item, "minted token must resolve to a pending item")
+		require.Empty(t, reason, "freshly minted token has no spent reason")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Mint deadlocked: logging acquired h.mu while the lock was held")
+	}
+}
+
 // TestSameOriginCSRF pins the browser-only CSRF gate: matching Origin passes,
 // Referer fallback parses to scheme://host, and requests with neither header
 // are rejected.

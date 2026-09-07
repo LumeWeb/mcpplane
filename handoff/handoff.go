@@ -178,10 +178,13 @@ func (h *Endpoint) Mint(Payload any) string {
 	if err := h.loopback.EnsureLoopback(h.RegisterHandlers); err != nil {
 		return ""
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	token := session.StrongRandomID()
+	h.mu.Lock()
 	h.items[token] = &Item{Payload: Payload, expiresAt: h.now().Add(h.ttl)}
+	h.mu.Unlock()
+	// Logging must happen OUTSIDE h.mu: Logf acquires h.mu and sync.Mutex is
+	// not reentrant, so calling Logf under the lock would deadlock every
+	// one-time hand-off mint.
 	h.Logf().Debug("one-time hand-off minted", zap.String("prefix", h.prefix))
 	return h.loopback.URLFor(h.prefix, token)
 }
