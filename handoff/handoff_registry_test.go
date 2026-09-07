@@ -105,6 +105,75 @@ func TestHandoffRegistryBounded(t *testing.T) {
 	assert.True(t, retired["h1"], "evicted flow must retire its backing handle")
 }
 
+// TestBeginDoesNotEvictSelf pins the self-eviction landmine: when the handle
+// being (re)registered is ALSO the oldest entry at capacity, the eviction path
+// must not pick it — deleting then cleanup-ing it would retire the backing
+// handle Begin is about to reuse, so a resume would hit a dead store handle
+// for a just-refreshed flow. (a) New handle at capacity still evicts the
+// oldest; (b) re-registering the SAME handle at capacity evicts/retires
+// nothing and Get returns the fresh continuation.
+func TestBeginDoesNotEvictSelfAtCapacity(t *testing.T) {
+	// (a) NEW handle at capacity: the oldest/other entry is evicted + retired.
+	t.Run("new handle evicts oldest", func(t *testing.T) {
+		reg := NewHandoffRegistry()
+		reg.maxEntries = 2
+		reg.ttp = time.Hour
+		reg.now = func() time.Time { return time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC) }
+		cont := func(ctx context.Context, h string, d map[string]any) (model.ToolResult, error) {
+			return model.ToolResult{Text: "done"}, nil
+		}
+		retired := map[string]bool{}
+		reg.SetCleanup(func(handle string) { retired[handle] = true })
+
+		reg.Begin("h1", cont)
+		reg.now = func() time.Time { return time.Date(2026, 8, 11, 0, 0, 1, 0, time.UTC) }
+		reg.Begin("h2", cont)
+		reg.now = func() time.Time { return time.Date(2026, 8, 11, 0, 0, 2, 0, time.UTC) }
+		reg.Begin("h3", cont) // at capacity -> evicts h1, the oldest
+
+		_, ok := reg.Get("h1")
+		assert.False(t, ok, "oldest entry must be evicted on overflow")
+		assert.True(t, retired["h1"], "evicted flow must retire its backing handle")
+		_, ok = reg.Get("h3")
+		assert.True(t, ok, "registering handle survives overflow")
+	})
+
+	// (b) SAME handle re-registered at capacity: nothing evicted, nothing
+	// retired; Get returns the freshly registered continuation.
+	t.Run("re-register same handle keeps it alive", func(t *testing.T) {
+		reg := NewHandoffRegistry()
+		reg.maxEntries = 2
+		reg.ttp = time.Hour
+		reg.now = func() time.Time { return time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC) }
+		contOld := func(ctx context.Context, h string, d map[string]any) (model.ToolResult, error) {
+			return model.ToolResult{Text: "old"}, nil
+		}
+		contFresh := func(ctx context.Context, h string, d map[string]any) (model.ToolResult, error) {
+			return model.ToolResult{Text: "fresh"}, nil
+		}
+		retired := map[string]bool{}
+		reg.SetCleanup(func(handle string) { retired[handle] = true })
+
+		reg.Begin("h1", contOld)
+		reg.now = func() time.Time { return time.Date(2026, 8, 11, 0, 0, 1, 0, time.UTC) }
+		reg.Begin("h2", contOld) // at capacity; h1 is also the oldest entry
+		reg.now = func() time.Time { return time.Date(2026, 8, 11, 0, 0, 2, 0, time.UTC) }
+		reg.Begin("h1", contFresh) // re-register the OLDEST handle itself
+
+		assert.NotContains(t, retired, "h1",
+			"re-registered handle must not be evicted/retired as its own oldest entry")
+		assert.NotContains(t, retired, "h2",
+			"the other live continuation must survive a self re-registration")
+		got, ok := reg.Get("h1")
+		require.True(t, ok, "re-registered continuation must resolve")
+		r, err := got(context.Background(), "h1", nil)
+		require.NoError(t, err)
+		require.Equal(t, "fresh", r.Text, "Get must return the fresh continuation, not the stale one")
+		_, ok = reg.Get("h2")
+		assert.True(t, ok, "capacity must not shrink below the bounded size on re-register")
+	})
+}
+
 // TestBeginCleanupDoesNotHoldLock verifies that Begin runs the injected cleanup
 // callback OUTSIDE the registry lock. The callback acquires its own
 // AsyncHandleStore lock, so it must not block every other registry operation

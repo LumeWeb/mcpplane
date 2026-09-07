@@ -108,7 +108,13 @@ func (r *HandoffRegistry) Begin(handle string, c ResumeContinuation) {
 				oldest, oldestAt = h, e.createdAt
 			}
 		}
-		if oldest != "" {
+		// The handle being (re)registered must never be its own eviction
+		// victim: if IT is the oldest entry, deleting + cleanup would retire
+		// the backing store handle that this very Begin is about to reuse, so
+		// a subsequent resume would hit a dead handle for a just-refreshed
+		// flow. Re-registering overwrites its continuation anyway (same map
+		// size), so no eviction is needed in that case.
+		if oldest != "" && oldest != handle {
 			delete(r.cont, oldest)
 			evicted = append(evicted, oldest)
 		}
