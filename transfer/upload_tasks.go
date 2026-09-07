@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 )
@@ -681,13 +682,24 @@ func (m *UploadTaskManager) pruneLocked() {
 		return
 	}
 	now := time.Now()
+	cutoff := now.Add(-m.ttl)
+	// Collect the evictions first instead of tombstoning inline: the map walk
+	// below is in RANDOM order, and tombstoneLocked appends to the tombstone
+	// FIFO in walk order. The retirement loop beneath relies on tombstoneOrder
+	// being monotonic by FinishedAt (it stops at the first young tombstone), so
+	// tombstoning inline would occasionally park an older tombstone behind a
+	// younger head and strand it past the retention window for up to an extra
+	// TTL. The batch is appended in FinishedAt order after the walk.
+	type eviction struct {
+		id   string
+		tomb *UploadTask
+	}
+	var evictions []eviction
 	for id, t := range m.tasks {
 		switch t.task.State {
 		case UploadStateCompleted, UploadStateFailed, UploadStateCancelled:
-			cutoff := now.Add(-m.ttl)
 			if t.task.FinishedAt != nil && t.task.FinishedAt.Before(cutoff) {
-				m.tombstoneLocked(id, t.task)
-				delete(m.tasks, id)
+				evictions = append(evictions, eviction{id: id, tomb: t.task})
 			}
 		case UploadStatePrepared:
 			// Never fulfilled before its window lapsed: evict by creation time
@@ -702,14 +714,28 @@ func (m *UploadTaskManager) pruneLocked() {
 			}
 			if preparedTTL > 0 && t.task.CreatedAt.Before(now.Add(-preparedTTL)) {
 				exp := cloneTask(t.task)
-				now := time.Now()
 				exp.State = UploadStateExpired
 				exp.Err = "upload handle expired before any bytes were supplied (presigned endpoint window lapsed)"
 				exp.FinishedAt = &now
-				m.tombstoneLocked(id, exp)
-				delete(m.tasks, id)
+				evictions = append(evictions, eviction{id: id, tomb: exp})
 			}
 		}
+	}
+	// Oldest-FinishedAt first, so the FIFO stays monotonic by FinishedAt
+	// across the batch (a nil FinishedAt cannot occur — terminal evictions
+	// require one and the expired snapshot sets one — but sorts first
+	// defensively). Stable: entries with equal FinishedAt expire together, so
+	// their relative order is irrelevant.
+	sort.SliceStable(evictions, func(i, j int) bool {
+		fi, fj := evictions[i].tomb.FinishedAt, evictions[j].tomb.FinishedAt
+		if fi == nil || fj == nil {
+			return fi == nil && fj != nil
+		}
+		return fi.Before(*fj)
+	})
+	for _, e := range evictions {
+		m.tombstoneLocked(e.id, e.tomb)
+		delete(m.tasks, e.id)
 	}
 	// Retire tombstones that are themselves past the retention window so the
 	// tombstone map cannot grow without bound; after this point a handle is
@@ -719,7 +745,6 @@ func (m *UploadTaskManager) pruneLocked() {
 	// (they were tombstoned later), so we stop scanning and truncate the
 	// already-retired prefix. O(tombstones) worst case, but the common hot
 	// path (nothing expired) is O(1).
-	cutoff := now.Add(-m.ttl)
 	retired := 0
 	for _, id := range m.tombstoneOrder {
 		tomb, ok := m.tombstones[id]
