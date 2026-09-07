@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
@@ -52,12 +53,22 @@ func resourceTemplateHandler(template string, handler model.ResourceHandler) mcp
 	}
 	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		arguments := map[string]string{}
-		matches := parsed.Regexp().FindStringSubmatch(req.Params.URI)
-		if matches != nil {
-			for i, name := range parsed.Varnames() {
-				if i+1 < len(matches) {
-					arguments[name] = matches[i+1]
-				}
+		// Match per variable: the regexp/regex-index approach misaligns for
+		// multi-variable ({a,b}) and exploded ({a*}) expressions, where the
+		// regexp yields one capture group per expression rather than per
+		// variable. List/KV values keep their distinct serializations.
+		for name, value := range parsed.Match(req.Params.URI) {
+			if !value.Valid() {
+				continue
+			}
+			if value.T == uritemplate.ValueTypeString {
+				arguments[name] = value.String()
+				continue
+			}
+			if kv := value.KV(); kv != nil {
+				arguments[name] = strings.Join(kv, ",")
+			} else {
+				arguments[name] = strings.Join(value.List(), ",")
 			}
 		}
 		result, err := handler(ctx, model.ResourceRequest{
