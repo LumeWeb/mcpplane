@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -223,6 +224,34 @@ func (f *failingToolRegistrar) register(_ *sdk.Server, _ model.ToolDescriptor, _
 	return fmt.Errorf("mcp: helper registration boom")
 }
 
+// serverListedResourceURIs drives the server's public resources/list surface
+// through an in-memory client session and returns the listed resource URIs, so
+// tests can observe whether a ui:// resource is actually LIVE on the server
+// (not just tracked in client-side registry maps).
+func serverListedResourceURIs(t *testing.T, srv *sdk.Server) []string {
+	t.Helper()
+	ctx := context.Background()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "apps-test-client", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	list, err := cs.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatalf("resources/list: %v", err)
+	}
+	uris := make([]string, 0, len(list.Resources))
+	for _, r := range list.Resources {
+		uris = append(uris, r.URI)
+	}
+	return uris
+}
+
 func TestRegisterAppViewNoPartialWiringOnFailingHelper(t *testing.T) {
 	failing := &failingToolRegistrar{}
 	sdk.SetToolRegistrar(failing.register)
@@ -230,8 +259,9 @@ func TestRegisterAppViewNoPartialWiringOnFailingHelper(t *testing.T) {
 
 	reg := apps.NewAppRegistry()
 	cat := newCatalog("upload_file")
+	srv := sdk.NewServer(nil)
 
-	err := reg.RegisterAppView(sdk.NewServer(nil), cat, apps.AppView{
+	err := reg.RegisterAppView(srv, cat, apps.AppView{
 		URI:      "ui://uploads/ipfs.html",
 		Name:     "ipfs-upload",
 		HTML:     testViewHTML,
@@ -244,8 +274,20 @@ func TestRegisterAppViewNoPartialWiringOnFailingHelper(t *testing.T) {
 	require.Error(t, err, "failing helper registration must fail the whole view")
 	require.Contains(t, err.Error(), "helper registration boom")
 
-	// No tool->view association may be recorded and no catalog metadata may
-	// have been attached: helper wiring failed after the view registered.
+	// SERVER-SIDE: the ui:// resource must NOT be live on the server. The
+	// resource registration is gated behind helper success, so a helper
+	// failure can never leave an orphaned ui:// resource on srv. Asserted via
+	// the protocol surface (resources/list) — this fails under the old
+	// ordering, where RegisterAppResource ran before the helper loop and the
+	// resource stayed live with no rollback.
+	listed := serverListedResourceURIs(t, srv)
+	require.NotContains(t, listed, "ui://uploads/ipfs.html",
+		"no ui:// resource may be live on the server when a helper fails")
+	require.Empty(t, listed,
+		"the server must list zero resources after a failed helper registration")
+
+	// Client-side: no tool->view association may be recorded and no catalog
+	// metadata may have been attached.
 	require.Nil(t, cat.entries["upload_file"].Meta["ui"],
 		"no _meta.ui may be attached when a helper fails")
 	_, ok := reg.AppInfoForTool("upload_file")

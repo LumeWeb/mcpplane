@@ -217,6 +217,24 @@ func (r *AppRegistry) RegisterAppView(srv *sdk.Server, catalog AppCatalog, v App
 		}
 	}
 
+	// Helpers are registered BEFORE the ui:// resource. The helper loop is the
+	// only genuinely runtime-failing step here (the tool registrar can fail),
+	// and RegisterAppResource has no rollback, so registering the resource only
+	// after every helper succeeds means a helper failure can never leave an
+	// orphaned live ui:// resource on the server. The remaining failure modes
+	// of RegisterAppResource (nil server, empty URI) are pre-checked above, so
+	// registering it last preserves the "full success = everything wired"
+	// atomicity contract without needing a rollback; helper registration stops
+	// at the first failure.
+	for _, h := range v.Helpers {
+		if err := sdk.RegisterAppTool(srv, h, model.AppToolMeta{
+			ResourceURI: v.URI,
+			Visibility:  []model.ToolVisibility{model.ToolVisibilityApp},
+		}); err != nil {
+			return err
+		}
+	}
+
 	domain := r.viewDomain(v.Domain)
 	info := AppViewInfo{URI: v.URI, Name: v.Name, Title: v.Title}
 	if err := sdk.RegisterAppResource(srv, sdk.AppResource{
@@ -234,15 +252,6 @@ func (r *AppRegistry) RegisterAppView(srv *sdk.Server, catalog AppCatalog, v App
 		HTML:               v.HTML,
 	}); err != nil {
 		return err
-	}
-
-	for _, h := range v.Helpers {
-		if err := sdk.RegisterAppTool(srv, h, model.AppToolMeta{
-			ResourceURI: v.URI,
-			Visibility:  []model.ToolVisibility{model.ToolVisibilityApp},
-		}); err != nil {
-			return err
-		}
 	}
 
 	// Only after every registration succeeded, attach _meta.ui and record the
