@@ -50,6 +50,10 @@ const defaultPreparedTTL = DefaultHTTPUploadTTL
 // realistic concurrency of in-flight uploads.
 const defaultMaxPrepared = 64
 
+// execTimeoutMessage is the error recorded on a task force-failed by the
+// ExecTimeout watchdog (a hung executor that ignored context cancellation).
+const execTimeoutMessage = "upload exceeded execution timeout"
+
 const (
 	// UploadStatePrepared marks an upload operation whose handle/task exists
 	// but whose bytes have not been supplied yet. It is created up front by
@@ -94,6 +98,11 @@ type trackedTask struct {
 	// Cancel and the completion goroutine race (http bodies are not guaranteed
 	// to be idempotent on Close).
 	closeOnce sync.Once
+	// timedOut records that the ExecTimeout watchdog force-failed this task.
+	// The completion goroutine consults it so a hung executor that only
+	// returns long after the timeout fired cannot overwrite the authoritative
+	// timeout failure with its late result. Guarded by m.mu.
+	timedOut bool
 	// preparedTTL is the presigned endpoint lifetime recorded at Prepare time.
 	// pruneLocked evicts an unfulfilled Prepared task against THIS value (the
 	// actual endpoint TTL) so a task is never pruned while its endpoint is
@@ -438,11 +447,29 @@ func (m *UploadTaskManager) spawn(tt *trackedTask, runCtx context.Context, reade
 		// reader and the MaxActive slot forever, defeating the slot guard.
 		// AfterFunc fires exactly once; Stop below disarms it on normal return.
 		watchdog := time.AfterFunc(m.ExecTimeout, func() {
+			// Abort the hung work: close the owned reader (aborting an
+			// in-flight non-cancellable read) and cancel runCtx.
 			tt.closeReader()
-			cancel := tt.cancel
-			if cancel != nil {
+			if cancel := tt.cancel; cancel != nil {
 				cancel()
 			}
+			// Force-fail the task so an executor that ignores context
+			// cancellation and never returns cannot pin the task in
+			// queued/running forever: mirror the completion path's failure
+			// bookkeeping so the state is observable and the MaxActive slot
+			// (which counts queued/running) is released. Only transition from
+			// a non-terminal state so Cancel/a real completion is never
+			// overwritten; the completion goroutine, if it returns late, sees
+			// timedOut and keeps this outcome.
+			failedAt := time.Now()
+			m.mu.Lock()
+			if task.State == UploadStateQueued || task.State == UploadStateRunning {
+				tt.timedOut = true
+				task.State = UploadStateFailed
+				task.Err = execTimeoutMessage
+				task.FinishedAt = &failedAt
+			}
+			m.mu.Unlock()
 		})
 		// archiveMode/wrap are sourced per-path: Start (a raw app-picker or
 		// legacy bare-mint PUT with no agent contract) passes explicit
@@ -463,8 +490,13 @@ func (m *UploadTaskManager) spawn(tt *trackedTask, runCtx context.Context, reade
 		}
 		finished := time.Now()
 		m.mu.Lock()
-		cancelled := task.State == UploadStateCancelled
-		if !cancelled {
+		// Keep the authoritative outcome when Cancel or the ExecTimeout
+		// watchdog already finished the task (the watchdog case is a hung
+		// executor that returned only after the timeout fired): release the
+		// reader and the run context below, but never overwrite the recorded
+		// failure with this late result.
+		aborted := task.State == UploadStateCancelled || tt.timedOut
+		if !aborted {
 			task.Result = result
 			task.FinishedAt = &finished
 			if err != nil {
