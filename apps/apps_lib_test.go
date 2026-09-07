@@ -3,6 +3,7 @@ package apps_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -178,12 +179,87 @@ func TestRegisterAppViewValidationErrors(t *testing.T) {
 	require.False(t, ok)
 }
 
+// TestRegisterAppViewNoPartialWiringOnLateFailure pins that a registration
+// failure AFTER a valid attach target would have been wired (a missing later
+// AttachTo name, or a failing helper) leaves zero partial wiring: catalog
+// metadata untouched, no module-level tool->view association recorded, no
+// helpers registered.
+func TestRegisterAppViewNoPartialWiringOnLaterAttachToMissing(t *testing.T) {
+	stub := &toolRegistrarStub{}
+	sdk.SetToolRegistrar(stub.register)
+	t.Cleanup(func() { sdk.SetToolRegistrar(nil) })
+
+	reg := apps.NewAppRegistry()
+	cat := newCatalog("upload_file", "vault_status")
+	cat.entries["upload_file"].Meta = map[string]any{"preexisting": true}
+
+	err := reg.RegisterAppView(sdk.NewServer(nil), cat, apps.AppView{
+		URI:      "ui://uploads/ipfs.html",
+		Name:     "ipfs-upload",
+		HTML:     testViewHTML,
+		AttachTo: []string{"upload_file", "vault_missing"},
+	})
+	require.Error(t, err, "missing later AttachTo tool must be an error")
+	require.Contains(t, err.Error(), "vault_missing")
+
+	// The earlier valid target must NOT have been touched.
+	require.Equal(t, map[string]any{"preexisting": true},
+		cat.entries["upload_file"].Meta, "catalog meta must be untouched on failure")
+	_, ok := reg.AppInfoForTool("upload_file")
+	require.False(t, ok, "no tool->view association may be recorded on failure")
+	_, ok = reg.AppInfoForTool("vault_missing")
+	require.False(t, ok)
+	require.Empty(t, stub.names, "no helpers may register once validation fails")
+}
+
+// failingToolRegistrar always fails, simulating a helper registration error
+// surfaced from the sdk layer.
+type failingToolRegistrar struct {
+	invocations int
+}
+
+func (f *failingToolRegistrar) register(_ *sdk.Server, _ model.ToolDescriptor, _ model.ToolHandler) error {
+	f.invocations++
+	return fmt.Errorf("mcp: helper registration boom")
+}
+
+func TestRegisterAppViewNoPartialWiringOnFailingHelper(t *testing.T) {
+	failing := &failingToolRegistrar{}
+	sdk.SetToolRegistrar(failing.register)
+	t.Cleanup(func() { sdk.SetToolRegistrar(nil) })
+
+	reg := apps.NewAppRegistry()
+	cat := newCatalog("upload_file")
+
+	err := reg.RegisterAppView(sdk.NewServer(nil), cat, apps.AppView{
+		URI:      "ui://uploads/ipfs.html",
+		Name:     "ipfs-upload",
+		HTML:     testViewHTML,
+		AttachTo: []string{"upload_file"},
+		Helpers: []model.ToolDescriptor{
+			{Name: "helper_one"},
+			{Name: "helper_two"},
+		},
+	})
+	require.Error(t, err, "failing helper registration must fail the whole view")
+	require.Contains(t, err.Error(), "helper registration boom")
+
+	// No tool->view association may be recorded and no catalog metadata may
+	// have been attached: helper wiring failed after the view registered.
+	require.Nil(t, cat.entries["upload_file"].Meta["ui"],
+		"no _meta.ui may be attached when a helper fails")
+	_, ok := reg.AppInfoForTool("upload_file")
+	require.False(t, ok, "no tool->view association may be recorded when a helper fails")
+	require.Equal(t, 1, failing.invocations,
+		"helpers stop at the first failure; later helpers are not registered")
+}
+
 // TestNewOpenLauncherDescriptor pins the launcher tool descriptor: it carries
 // the ui resourceUri in _meta.ui with model+app visibility, defaults its
 // description, exposes the single universal (fallback) target, and its handler
 // echoes the view plus any model-supplied arguments.
 func TestNewOpenLauncherDescriptor(t *testing.T) {
-	desc := apps.NewOpenLauncherDescriptor(apps.OpenLauncherSpec{
+	desc, err := apps.NewOpenLauncherDescriptor(apps.OpenLauncherSpec{
 		Name:        "open_upload_manager",
 		Title:       "Upload Manager",
 		Category:    model.CategoryStorage,
@@ -209,6 +285,8 @@ func TestNewOpenLauncherDescriptor(t *testing.T) {
 	require.Empty(t, desc.MCPTargets[0].Require)
 	require.Equal(t, desc.Description, desc.MCPTargets[0].Description)
 
+	require.NoError(t, err, "a fully specified launcher must build")
+
 	// Handler: launching is the action; the result surfaces the view URI and
 	// any model-passed arguments.
 	res, err := desc.Handler(context.Background(), model.ToolRequest{
@@ -223,4 +301,19 @@ func TestNewOpenLauncherDescriptor(t *testing.T) {
 	_, hasHint := sc["hint"]
 	assert.True(t, hasHint, "model-passed arguments must be surfaced to the app")
 	require.Contains(t, res.Text, "The app view is open.")
+}
+
+// TestNewOpenLauncherDescriptorEmptyResourceURIFails pins the fail-fast
+// contract: a launcher without a view URI must return an error (never a
+// descriptor whose _meta.ui.resourceUri was silently dropped with its handler
+// still reporting success).
+func TestNewOpenLauncherDescriptorEmptyResourceURIFails(t *testing.T) {
+	desc, err := apps.NewOpenLauncherDescriptor(apps.OpenLauncherSpec{
+		Name:  "open_something",
+		Title: "Something",
+	})
+	require.Error(t, err, "empty ResourceURI must be a construction error")
+	require.Contains(t, err.Error(), "resourceUri")
+	require.Equal(t, model.ToolDescriptor{}, desc,
+		"no half-built descriptor may leak to the caller")
 }

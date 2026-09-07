@@ -186,7 +186,10 @@ func (r *AppRegistry) DeleteAppViewInfo(toolName string) {
 //
 // Returns an error if srv/catalog are nil, URI/Name/Title are empty, any
 // AttachTo tool is missing from the catalog, or a helper registers with an
-// empty URI. App wiring is additive: existing tools and their plain-host text
+// empty URI. A failed registration never leaves partial wiring behind: every
+// attach target is validated and all resource/helper registrations succeed
+// before any catalog metadata is attached or any tool→view association is
+// recorded. App wiring is additive: existing tools and their plain-host text
 // results are preserved, and a tool's existing _meta is extended, never
 // replaced.
 func (r *AppRegistry) RegisterAppView(srv *sdk.Server, catalog AppCatalog, v AppView) error {
@@ -206,17 +209,16 @@ func (r *AppRegistry) RegisterAppView(srv *sdk.Server, catalog AppCatalog, v App
 		return fmt.Errorf("mcp: app view %q requires html", v.URI)
 	}
 
-	domain := r.viewDomain(v.Domain)
-	info := AppViewInfo{URI: v.URI, Name: v.Name, Title: v.Title}
+	// Validate every attach target up front so a missing name fails before
+	// any catalog metadata is attached or any tool/helper is registered.
 	for _, toolName := range v.AttachTo {
-		if err := AttachAppMeta(catalog, toolName, v.URI); err != nil {
-			return err
+		if _, ok := catalog.Get(toolName); !ok {
+			return fmt.Errorf("mcp: app view tool %q not in catalog", toolName)
 		}
-		r.mu.Lock()
-		r.appViewsByTool[toolName] = info
-		r.mu.Unlock()
 	}
 
+	domain := r.viewDomain(v.Domain)
+	info := AppViewInfo{URI: v.URI, Name: v.Name, Title: v.Title}
 	if err := sdk.RegisterAppResource(srv, sdk.AppResource{
 		URI:   v.URI,
 		Name:  v.Name,
@@ -241,6 +243,18 @@ func (r *AppRegistry) RegisterAppView(srv *sdk.Server, catalog AppCatalog, v App
 		}); err != nil {
 			return err
 		}
+	}
+
+	// Only after every registration succeeded, attach _meta.ui and record the
+	// tool→view associations, so a failure anywhere above leaves no partial
+	// app wiring behind.
+	for _, toolName := range v.AttachTo {
+		if err := AttachAppMeta(catalog, toolName, v.URI); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		r.appViewsByTool[toolName] = info
+		r.mu.Unlock()
 	}
 
 	return nil
