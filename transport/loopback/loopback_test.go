@@ -29,7 +29,7 @@ func TestURLForLoopbackMode(t *testing.T) {
 	l := &LoopbackServer{}
 	if err := l.EnsureLoopback(func(mux *http.ServeMux) {
 		mux.HandleFunc("/seed/", func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("secret"))
+			_, _ = w.Write([]byte("seed-page-body"))
 		})
 	}); err != nil {
 		t.Fatalf("EnsureLoopback: %v", err)
