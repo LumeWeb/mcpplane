@@ -41,12 +41,17 @@ type OpenLauncherSpec struct {
 // NewOpenLauncherDescriptor builds a model-facing launcher tool for the given
 // app view. The tool's handler returns a minimal structured result ("the view is
 // open"); the operation the view represents is driven by the iframe over
-// callServerTool.
-func NewOpenLauncherDescriptor(spec OpenLauncherSpec) model.ToolDescriptor {
-	appMeta, _ := sdk.MarshalToolMeta(model.AppToolMeta{
+// callServerTool. It returns an error when spec.ResourceURI is empty, since a
+// launcher without a view URI would silently lose its _meta.ui.resourceUri and
+// render nothing.
+func NewOpenLauncherDescriptor(spec OpenLauncherSpec) (model.ToolDescriptor, error) {
+	appMeta, err := sdk.MarshalToolMeta(model.AppToolMeta{
 		ResourceURI: spec.ResourceURI,
 		Visibility:  []model.ToolVisibility{model.ToolVisibilityModel, model.ToolVisibilityApp},
 	})
+	if err != nil {
+		return model.ToolDescriptor{}, err
+	}
 	if spec.InputSchema == nil {
 		spec.InputSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 	}
@@ -56,7 +61,7 @@ func NewOpenLauncherDescriptor(spec OpenLauncherSpec) model.ToolDescriptor {
 	}
 	desc += " open_app (the consolidated launcher) is the unified entry point on hosts where it is visible; this per-app launcher is also discoverable via search_tools."
 
-	return model.ToolDescriptor{
+	descriptor := model.ToolDescriptor{
 		Name:        spec.Name,
 		Title:       spec.Title,
 		Description: desc,
@@ -78,4 +83,6 @@ func NewOpenLauncherDescriptor(spec OpenLauncherSpec) model.ToolDescriptor {
 			}, nil
 		},
 	}
+
+	return descriptor, nil
 }
