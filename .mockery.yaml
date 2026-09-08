@@ -1,0 +1,18 @@
+include-auto-generated: true
+template: testify
+template-data:
+  unroll-variadic: true
+filename: "{{.InterfaceName}}.go"
+packages:
+  go.lumeweb.com/mcpplane/apps:
+    config:
+      dir: ./mocks/apps
+      pkgname: mocks
+    interfaces:
+      AppCatalog: {}
+  go.lumeweb.com/mcpplane/handoff:
+    config:
+      dir: ./mocks/handoff
+      pkgname: mocks
+    interfaces:
+      Handler: {}
