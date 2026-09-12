@@ -292,7 +292,7 @@ func TestRedactTokenClaims(t *testing.T) {
 	t.Run("nested maps and slices are copied and redacted", func(t *testing.T) {
 		in := map[string]any{
 			"workspace": map[string]any{
-				"access_token": "inner-secret",
+				"access_token": "inner-value",
 				"name":         "ok",
 				"deep":         map[string]any{"refresh_token": "inner2"},
 			},
@@ -309,9 +309,25 @@ func TestRedactTokenClaims(t *testing.T) {
 		assert.Equal(t, redactedPlaceholder, entry["api_key"])
 		assert.Equal(t, "u", entry["sub"])
 
+		// Container types verifiers commonly build natively are covered too.
+		native := RedactTokenClaims(map[string]any{
+			"strings_map": map[string]string{"signing_key": "native", "region": "eu"},
+			"string_list": []string{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.hunterS2r1Fc2t8dbXJh9P1L2XaKvYQ", "plain"},
+			"any_map":     map[any]any{"token": "any-map-cred", "kind": "meta"},
+		})
+		sm := native["strings_map"].(map[string]string)
+		assert.Equal(t, redactedPlaceholder, sm["signing_key"])
+		assert.Equal(t, "eu", sm["region"])
+		sl := native["string_list"].([]string)
+		assert.Equal(t, redactedPlaceholder, sl[0], "JWT-shaped values redact inside []string")
+		assert.Equal(t, "plain", sl[1])
+		am := native["any_map"].(map[any]any)
+		assert.Equal(t, redactedPlaceholder, am["token"])
+		assert.Equal(t, "meta", am["kind"])
+
 		// No reference to client-owned containers survives.
 		inner := in["workspace"].(map[string]any)
-		assert.Equal(t, "inner-secret", inner["access_token"], "input must be untouched")
+		assert.Equal(t, "inner-value", inner["access_token"], "input must be untouched")
 		inner["access_token"] = "mutated"
 		assert.Equal(t, redactedPlaceholder, out["workspace"].(map[string]any)["access_token"],
 			"nested maps must be deep copies, not shared references")

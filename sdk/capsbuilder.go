@@ -256,6 +256,36 @@ func redactClaimValue(v any) any {
 			out[i] = redactClaimValue(inner)
 		}
 		return out
+	case map[string]string:
+		out := make(map[string]string, len(v))
+		for k, inner := range v {
+			if isSensitiveTokenClaim(k) || looksLikeCredential(inner) {
+				out[k] = redactedPlaceholder
+				continue
+			}
+			out[k] = inner
+		}
+		return out
+	case []string:
+		out := make([]string, len(v))
+		for i, inner := range v {
+			if looksLikeCredential(inner) {
+				out[i] = redactedPlaceholder
+				continue
+			}
+			out[i] = inner
+		}
+		return out
+	case map[any]any:
+		out := make(map[any]any, len(v))
+		for k, inner := range v {
+			if ks, ok := k.(string); ok && isSensitiveTokenClaim(ks) {
+				out[k] = redactedPlaceholder
+				continue
+			}
+			out[k] = redactClaimValue(inner)
+		}
+		return out
 	case string:
 		if looksLikeCredential(v) {
 			return redactedPlaceholder
