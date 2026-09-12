@@ -39,10 +39,10 @@ type RequestCapsOptions struct {
 	DevSnapshot bool
 }
 
-// redactedHeaderPlaceholder replaces the value of every sensitive header so
-// names survive (dev_host_env legitimately introspects names) while values
-// never reach profiles, evidence, or dev-tool output.
-const redactedHeaderPlaceholder = "[REDACTED]"
+// redactedPlaceholder replaces the value of every sensitive header or token
+// claim so names survive (dev_host_env legitimately introspects names) while
+// values never reach profiles, evidence, or dev-tool output.
+const redactedPlaceholder = "[REDACTED]"
 
 // sensitivePrefixes are case-insensitive header-name prefixes that denote
 // request-routing metadata the client should not see echoed back.
@@ -83,7 +83,7 @@ func NewRequestCapsBuilder(opts RequestCapsOptions) func(req *CallToolRequest) *
 					Scopes:     extra.TokenInfo.Scopes,
 					Expiration: extra.TokenInfo.Expiration,
 					UserID:     extra.TokenInfo.UserID,
-					Extra:      extra.TokenInfo.Extra,
+					Extra:      RedactTokenClaims(extra.TokenInfo.Extra),
 				}
 			}
 		}
@@ -167,7 +167,7 @@ func RedactSensitiveHeaders(h http.Header) http.Header {
 		if isSensitiveHeader(name) {
 			redacted := make([]string, len(values))
 			for i := range values {
-				redacted[i] = redactedHeaderPlaceholder
+				redacted[i] = redactedPlaceholder
 			}
 			out[name] = redacted
 			continue
@@ -175,6 +175,52 @@ func RedactSensitiveHeaders(h http.Header) http.Header {
 		out[name] = values
 	}
 	return out
+}
+
+// sensitiveTokenClaimFragments are case-insensitive key fragments of OAuth
+// claims that carry raw credentials. Identity/audit claims (sub, aud, iss,
+// scope, ...) are metadata and stay intact for dev introspection; only keys
+// that can smuggle a credential are redacted.
+var sensitiveTokenClaimFragments = []string{
+	"token",
+	"secret",
+	"password",
+	"credential",
+	"authorization",
+}
+
+// RedactTokenClaims returns a copy of the token's arbitrary claims map with
+// credential-bearing entries replaced by a placeholder. Claim keys are
+// preserved (dev introspection legitimately reports which claims the client
+// presented) while values that look like raw credentials never reach
+// evidence, profiles, or dev-tool output. The input map is never mutated.
+//
+// A nil map returns nil.
+func RedactTokenClaims(extra map[string]any) map[string]any {
+	if extra == nil {
+		return nil
+	}
+	out := make(map[string]any, len(extra))
+	for k, v := range extra {
+		if isSensitiveTokenClaim(k) {
+			out[k] = redactedPlaceholder
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// isSensitiveTokenClaim reports whether the claim key plausibly carries a raw
+// credential rather than identity or audit metadata.
+func isSensitiveTokenClaim(key string) bool {
+	lower := strings.ToLower(key)
+	for _, fragment := range sensitiveTokenClaimFragments {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 // isSensitiveHeader reports whether the header name carries a secret value.
@@ -215,7 +261,7 @@ func SharedProfileFromCore(p canimcp.Profile) model.Profile {
 			Scopes:     p.TokenInfo.Scopes,
 			Expiration: p.TokenInfo.Expiration,
 			UserID:     p.TokenInfo.UserID,
-			Extra:      p.TokenInfo.Extra,
+			Extra:      RedactTokenClaims(p.TokenInfo.Extra),
 		}
 	}
 	features := make(model.FeatureSet, len(p.Features))

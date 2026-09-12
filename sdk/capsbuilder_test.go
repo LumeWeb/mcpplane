@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -186,11 +187,11 @@ func TestRequestCapsRedactsSensitiveHeaders(t *testing.T) {
 	require.NotNil(t, rc.Profile.Headers)
 
 	h := rc.Profile.Headers
-	assert.Equal(t, []string{redactedHeaderPlaceholder}, h["Authorization"], "Authorization value must be redacted")
-	assert.Equal(t, []string{redactedHeaderPlaceholder}, h["Cookie"], "Cookie value must be redacted")
-	assert.Equal(t, []string{redactedHeaderPlaceholder}, h["Proxy-Authorization"], "Proxy-Authorization value must be redacted")
-	assert.Equal(t, []string{redactedHeaderPlaceholder}, h["X-Forwarded-For"], "X-Forwarded-For value must be redacted")
-	assert.Equal(t, []string{redactedHeaderPlaceholder}, h["X-Forwarded-Proto"], "X-Forwarded-Proto value must be redacted")
+	assert.Equal(t, []string{redactedPlaceholder}, h["Authorization"], "Authorization value must be redacted")
+	assert.Equal(t, []string{redactedPlaceholder}, h["Cookie"], "Cookie value must be redacted")
+	assert.Equal(t, []string{redactedPlaceholder}, h["Proxy-Authorization"], "Proxy-Authorization value must be redacted")
+	assert.Equal(t, []string{redactedPlaceholder}, h["X-Forwarded-For"], "X-Forwarded-For value must be redacted")
+	assert.Equal(t, []string{redactedPlaceholder}, h["X-Forwarded-Proto"], "X-Forwarded-Proto value must be redacted")
 	// Names are preserved (dev_host_env legitimately introspects names).
 	for _, name := range []string{"Authorization", "Cookie", "Proxy-Authorization", "X-Forwarded-For", "X-Forwarded-Proto"} {
 		assert.Contains(t, h, name, "header name %s must be preserved", name)
@@ -204,6 +205,73 @@ func TestRequestCapsRedactsSensitiveHeaders(t *testing.T) {
 	assert.Equal(t, "Basic super-secret", req.Extra.Header.Get("Proxy-Authorization"))
 	assert.Equal(t, "203.0.113.7", req.Extra.Header.Get("X-Forwarded-For"))
 	assert.Equal(t, "https", req.Extra.Header.Get("X-Forwarded-Proto"))
+}
+
+func TestRequestCapsRedactsTokenClaims(t *testing.T) {
+	req := callToolReqWithMeta(t, textClientMeta(), &mcp.RequestExtra{
+		TokenInfo: &auth.TokenInfo{
+			Scopes:     []string{"vault:read"},
+			Expiration: time.Unix(0, 0).UTC(),
+			UserID:     "user-42",
+			Extra: map[string]any{
+				"access_token": "raw-jwt-value",
+				"id_token":     "another-jwt-value",
+				"proxy_secret": "hunter2",
+				// Identity/audit claims are metadata, not credentials.
+				"sub":   "user-42",
+				"aud":   []any{"api"},
+				"scope": "vault:read",
+			},
+		},
+	})
+
+	rc := NewRequestCapsBuilder(RequestCapsOptions{Hosted: true})(req)
+	require.NotNil(t, rc.Profile)
+	require.NotNil(t, rc.Profile.TokenInfo)
+
+	claims := rc.Profile.TokenInfo.Extra
+	assert.Equal(t, redactedPlaceholder, claims["access_token"], "raw token claims must be redacted")
+	assert.Equal(t, redactedPlaceholder, claims["id_token"])
+	assert.Equal(t, redactedPlaceholder, claims["proxy_secret"])
+	assert.Equal(t, "user-42", claims["sub"], "identity claims stay intact")
+	assert.Equal(t, []any{"api"}, claims["aud"])
+	assert.Equal(t, "vault:read", claims["scope"])
+	assert.Equal(t, "user-42", rc.Profile.TokenInfo.UserID, "UserID passes through unredacted")
+
+	// The live token info must be left intact.
+	assert.Equal(t, "raw-jwt-value", req.Extra.TokenInfo.Extra["access_token"])
+}
+
+func TestRedactTokenClaims(t *testing.T) {
+	t.Run("nil map stays nil", func(t *testing.T) {
+		assert.Nil(t, RedactTokenClaims(nil))
+	})
+
+	t.Run("credential-bearing keys redacted, keys preserved", func(t *testing.T) {
+		in := map[string]any{
+			"accessToken":          "a",
+			"refresh_token":        "b",
+			"IDToken":              "c",
+			"client_secret":        "d",
+			"password_hint":        "e",
+			"authorization_header": "f",
+			"credential_issuer":    "g",
+			"sub":                  "user",
+			"aud":                  "api",
+		}
+		out := RedactTokenClaims(in)
+		for _, key := range []string{"accessToken", "refresh_token", "IDToken", "client_secret", "password_hint", "authorization_header", "credential_issuer"} {
+			assert.Equal(t, redactedPlaceholder, out[key], "claim %s must be redacted", key)
+		}
+		assert.Equal(t, "user", out["sub"])
+		assert.Equal(t, "api", out["aud"])
+	})
+
+	t.Run("input map untouched", func(t *testing.T) {
+		in := map[string]any{"access_token": "raw"}
+		_ = RedactTokenClaims(in)
+		assert.Equal(t, "raw", in["access_token"])
+	})
 }
 
 func TestRedactSensitiveHeaders(t *testing.T) {
@@ -222,12 +290,12 @@ func TestRedactSensitiveHeaders(t *testing.T) {
 			"Mcp-Session-Id":      {"keep-me"},
 		}
 		out := RedactSensitiveHeaders(in)
-		assert.Equal(t, []string{redactedHeaderPlaceholder}, out["Authorization"])
-		assert.Equal(t, []string{redactedHeaderPlaceholder}, out["authorization"])
-		assert.Equal(t, []string{redactedHeaderPlaceholder}, out["Cookie"])
-		assert.Equal(t, []string{redactedHeaderPlaceholder}, out["Proxy-Authorization"])
-		assert.Equal(t, []string{redactedHeaderPlaceholder}, out["X-Forwarded-Host"])
-		assert.Equal(t, []string{redactedHeaderPlaceholder}, out["x-forwarded-proto"])
+		assert.Equal(t, []string{redactedPlaceholder}, out["Authorization"])
+		assert.Equal(t, []string{redactedPlaceholder}, out["authorization"])
+		assert.Equal(t, []string{redactedPlaceholder}, out["Cookie"])
+		assert.Equal(t, []string{redactedPlaceholder}, out["Proxy-Authorization"])
+		assert.Equal(t, []string{redactedPlaceholder}, out["X-Forwarded-Host"])
+		assert.Equal(t, []string{redactedPlaceholder}, out["x-forwarded-proto"])
 		assert.Equal(t, []string{"keep-me"}, out["Mcp-Session-Id"])
 	})
 
@@ -269,6 +337,15 @@ func TestSharedProfileFromCore(t *testing.T) {
 	// The feature set must be a copy, not a shared map.
 	out.Features[model.FeatSinkLocal] = true
 	assert.False(t, in.Has(canimcp.FeatSinkLocal))
+
+	// Claim redaction happens at the profile boundary too, so direct callers
+	// of SharedProfileFromCore cannot leak raw credentials either.
+	sensitive := SharedProfileFromCore(canimcp.Profile{
+		TokenInfo: &canimcp.TokenInfo{Extra: map[string]any{"access_token": "raw", "sub": "u"}},
+	})
+	require.NotNil(t, sensitive.TokenInfo)
+	assert.Equal(t, redactedPlaceholder, sensitive.TokenInfo.Extra["access_token"])
+	assert.Equal(t, "u", sensitive.TokenInfo.Extra["sub"])
 
 	// Nil wire info stays nil; a zero feature set converts to an empty
 	// (non-nil) set, matching the conversion behavior both consumers carry.
