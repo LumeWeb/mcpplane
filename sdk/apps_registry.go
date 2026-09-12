@@ -32,11 +32,33 @@ var (
 
 // SetToolRegistrar installs the tool-adapter used by app-tool registration.
 // It must be called once during hub assembly (before any server serves) so
-// RegisterAppTool can reuse the hub's handler-adaptation seam.
+// RegisterAppTool can reuse the hub's handler-adaptation seam. It is a void
+// setter (the prior adapter is intentionally not returned); consumers that
+// install a temporary adapter for a scoped registration capture the prior one
+// with GetToolRegistrar and restore it afterwards.
 func SetToolRegistrar(f RegisterToolFunc) {
 	registerToolMu.Lock()
 	registerToolFn = f
 	registerToolMu.Unlock()
+}
+
+// GetToolRegistrar returns the tool-registration adapter currently installed
+// via SetToolRegistrar, or nil when none has been installed. It complements
+// the void SetToolRegistrar so a consumer that temporarily installs its own
+// adapter (e.g. an assembly scoping app-only helper registration to a
+// particular handler-deps set) can capture and restore the prior adapter:
+//
+//	prev := sdk.GetToolRegistrar()
+//	sdk.SetToolRegistrar(myAdapter)
+//	defer sdk.SetToolRegistrar(prev)
+//
+// Unlike the unexported getToolRegistrar used by RegisterAppTool, it does not
+// manufacture a fail-fast stub for the unset case — nil is the honest "none
+// installed" answer, so a restore-to-the-fail-fast-default is representable.
+func GetToolRegistrar() RegisterToolFunc {
+	registerToolMu.RLock()
+	defer registerToolMu.RUnlock()
+	return registerToolFn
 }
 
 // getToolRegistrar returns the installed tool-registration adapter, or a
