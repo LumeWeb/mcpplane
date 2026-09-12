@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -323,4 +324,48 @@ func TestUnregisterAppResourceReleasesState(t *testing.T) {
 			t.Fatal("re-registered uri missing from registry")
 		}
 	}
+}
+
+// TestToolRegistrarCaptureRestore pins the GetToolRegistrar contract: it
+// returns nil when no adapter is installed, and a temporarily-installed
+// adapter can be captured and restored so the process-global seam never points
+// at a scoped (per-call deps) adapter after the scoped registration completes.
+// Adapters are distinguished behaviorally (each returns a unique error), since
+// Go function values cannot be compared with ==.
+func TestToolRegistrarCaptureRestore(t *testing.T) {
+	// Clean slate.
+	SetToolRegistrar(nil)
+	if got := GetToolRegistrar(); got != nil {
+		t.Fatalf("GetToolRegistrar with no adapter installed = %v, want nil", got)
+	}
+
+	errOne := errors.New("adapter-one")
+	errTwo := errors.New("adapter-two")
+	one := func(*Server, model.ToolDescriptor, model.ToolHandler) error { return errOne }
+	two := func(*Server, model.ToolDescriptor, model.ToolHandler) error { return errTwo }
+
+	SetToolRegistrar(one)
+	if got := GetToolRegistrar(); got == nil || !errors.Is(invokeAdapter(got), errOne) {
+		t.Fatal("GetToolRegistrar after SetToolRegistrar must return the installed adapter")
+	}
+
+	// Capture the prior adapter, install a scoped one, then restore.
+	prior := GetToolRegistrar()
+	SetToolRegistrar(two)
+	if got := GetToolRegistrar(); got == nil || !errors.Is(invokeAdapter(got), errTwo) {
+		t.Fatal("scoped adapter must replace the prior one while installed")
+	}
+	SetToolRegistrar(prior)
+	if got := GetToolRegistrar(); got == nil || !errors.Is(invokeAdapter(got), errOne) {
+		t.Fatal("GetToolRegistrar after restore must return the prior adapter")
+	}
+
+	// Leave a clean slate for any later test.
+	SetToolRegistrar(nil)
+}
+
+// invokeAdapter calls a captured RegisterToolFunc without a server (the test
+// adapters ignore their arguments and return their sentinel error).
+func invokeAdapter(f RegisterToolFunc) error {
+	return f(nil, model.ToolDescriptor{}, nil)
 }
