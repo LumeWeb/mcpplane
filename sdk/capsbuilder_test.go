@@ -173,9 +173,9 @@ func TestRequestCapsDevSnapshot(t *testing.T) {
 func TestRequestCapsRedactsSensitiveHeaders(t *testing.T) {
 	req := callToolReqWithMeta(t, textClientMeta(), &mcp.RequestExtra{
 		Header: http.Header{
-			"Authorization":       {"Bearer super-secret"},
-			"Cookie":              {"session=super-secret"},
-			"Proxy-Authorization": {"Basic super-secret"},
+			"Authorization":       {"Bearer dummy-value"},
+			"Cookie":              {"session=dummy-value"},
+			"Proxy-Authorization": {"Basic dummy-value"},
 			"X-Forwarded-For":     {"203.0.113.7"},
 			"X-Forwarded-Proto":   {"https"},
 			"User-Agent":          {"curl/8.0"},
@@ -200,9 +200,9 @@ func TestRequestCapsRedactsSensitiveHeaders(t *testing.T) {
 
 	// The live request header must be left intact; redaction happens in a
 	// copy.
-	assert.Equal(t, "Bearer super-secret", req.Extra.Header.Get("Authorization"))
-	assert.Equal(t, "session=super-secret", req.Extra.Header.Get("Cookie"))
-	assert.Equal(t, "Basic super-secret", req.Extra.Header.Get("Proxy-Authorization"))
+	assert.Equal(t, "Bearer dummy-value", req.Extra.Header.Get("Authorization"))
+	assert.Equal(t, "session=dummy-value", req.Extra.Header.Get("Cookie"))
+	assert.Equal(t, "Basic dummy-value", req.Extra.Header.Get("Proxy-Authorization"))
 	assert.Equal(t, "203.0.113.7", req.Extra.Header.Get("X-Forwarded-For"))
 	assert.Equal(t, "https", req.Extra.Header.Get("X-Forwarded-Proto"))
 }
@@ -216,7 +216,7 @@ func TestRequestCapsRedactsTokenClaims(t *testing.T) {
 			Extra: map[string]any{
 				"access_token": "raw-jwt-value",
 				"id_token":     "another-jwt-value",
-				"proxy_secret": "hunter2",
+				"proxy_secret": "dummy-value",
 				// Identity/audit claims are metadata, not credentials.
 				"sub":   "user-42",
 				"aud":   []any{"api"},
