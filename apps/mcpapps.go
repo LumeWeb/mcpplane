@@ -1,19 +1,16 @@
 // MCP Apps (ext-apps) client-capability handling.
 //
-// This file reads the client's advertised MCP Apps capability from a request's
-// extension settings. The SDK-neutral capability types live in model; the
-// server-side registration bridge (RegisterAppTool / RegisterAppResource) and
-// the SDK wire conversion live in the sdk package. Tool/resource business
-// logic must NOT import the MCP SDK and should use those typed helpers.
+// This file re-exports the client's advertised MCP Apps capability reader,
+// which lives in the sdk package next to the wire constants it consumes (the
+// SDK-neutral capability types live in model; the server-side registration
+// bridge (RegisterAppTool / RegisterAppResource) and the SDK wire conversion
+// also live in sdk). The re-export keeps in-repo callers compiling.
 //
-// The protocol constants and capability reader below mirror
-// @modelcontextprotocol/ext-apps.
+// The protocol constants below mirror @modelcontextprotocol/ext-apps.
 package apps
 
 import (
-	"encoding/json"
-
-	"go.lumeweb.com/mcpplane/model"
+	"go.lumeweb.com/mcpplane/sdk"
 )
 
 const (
@@ -31,26 +28,7 @@ const (
 
 // GetClientUICapability reads the typed MCP Apps capability from a client's
 // advertised `extensions` (map of extension id -> settings). It returns nil if
-// the client did not advertise MCP Apps.
-func GetClientUICapability(extensions map[string]any) *model.ClientUICapabilities {
-	raw, ok := extensions[EXTENSION_ID]
-	if !ok || raw == nil {
-		return nil
-	}
-	// The extension setting is a plain object (not an array/scalar). Decode it
-	// typed rather than casting fields by hand.
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	var parsed struct {
-		MIMETypes []string `json:"mimeTypes"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil
-	}
-	if parsed.MIMETypes == nil {
-		return &model.ClientUICapabilities{}
-	}
-	return &model.ClientUICapabilities{MIMETypes: parsed.MIMETypes}
-}
+// the client did not advertise MCP Apps. Implemented in sdk so the wire seam
+// owns the complete go-sdk-adjacent capability surface; the apps package
+// re-exports it for compatibility.
+var GetClientUICapability = sdk.GetClientUICapability
