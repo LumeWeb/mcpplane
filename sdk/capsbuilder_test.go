@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,24 +248,73 @@ func TestRedactTokenClaims(t *testing.T) {
 		assert.Nil(t, RedactTokenClaims(nil))
 	})
 
-	t.Run("credential-bearing keys redacted, keys preserved", func(t *testing.T) {
-		in := map[string]any{
-			"accessToken":          "a",
-			"refresh_token":        "b",
-			"IDToken":              "c",
-			"client_secret":        "d",
-			"password_hint":        "e",
-			"authorization_header": "f",
-			"credential_issuer":    "g",
-			"sub":                  "user",
-			"aud":                  "api",
-		}
-		out := RedactTokenClaims(in)
-		for _, key := range []string{"accessToken", "refresh_token", "IDToken", "client_secret", "password_hint", "authorization_header", "credential_issuer"} {
+	// Every denylist fragment must trigger redaction, whatever key embeds it.
+	t.Run("every sensitive fragment redacts", func(t *testing.T) {
+		for _, fragment := range sensitiveTokenClaimFragments {
+			key := "x_" + fragment + "_y"
+			out := RedactTokenClaims(map[string]any{key: "value"})
 			assert.Equal(t, redactedPlaceholder, out[key], "claim %s must be redacted", key)
 		}
-		assert.Equal(t, "user", out["sub"])
+	})
+
+	t.Run("identity claims pass through", func(t *testing.T) {
+		out := RedactTokenClaims(map[string]any{
+			"sub":       "user-42",
+			"aud":       "api",
+			"scope":     "vault:read",
+			"iss":       "https://sso.example",
+			"client_id": "public-app-id",
+		})
+		assert.Equal(t, "user-42", out["sub"])
 		assert.Equal(t, "api", out["aud"])
+		assert.Equal(t, "vault:read", out["scope"])
+		assert.Equal(t, "https://sso.example", out["iss"])
+		assert.EqualValues(t, "public-app-id", out["client_id"])
+	})
+
+	t.Run("credential-shaped values redacted under innocuous keys", func(t *testing.T) {
+		jwt := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.hunterS2r1Fc2t8dbXJh9P1L2XaKvYQ"
+		pem := "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+		longOpaque := strings.Repeat("a8Hq", 20) // 80 chars of base64url
+		out := RedactTokenClaims(map[string]any{
+			"sso_ticket":   jwt,
+			"upload_pem":   pem,
+			"handoff_blob": longOpaque,
+		})
+		assert.Equal(t, redactedPlaceholder, out["sso_ticket"], "JWT-shaped values must be redacted")
+		assert.Equal(t, redactedPlaceholder, out["upload_pem"], "PEM blocks must be redacted")
+		assert.Equal(t, redactedPlaceholder, out["handoff_blob"], "long opaque base64url values must be redacted")
+
+		assert.Equal(t, "a.b.c", RedactTokenClaims(map[string]any{"sub_note": "a.b.c"})["sub_note"],
+			"dot-delimited text that is not a JWS must pass through")
+	})
+
+	t.Run("nested maps and slices are copied and redacted", func(t *testing.T) {
+		in := map[string]any{
+			"workspace": map[string]any{
+				"access_token": "inner-secret",
+				"name":         "ok",
+				"deep":         map[string]any{"refresh_token": "inner2"},
+			},
+			"history": []any{map[string]any{"api_key": "k", "sub": "u"}, "audit-claim"},
+		}
+		out := RedactTokenClaims(in)
+
+		ws := out["workspace"].(map[string]any)
+		assert.Equal(t, redactedPlaceholder, ws["access_token"])
+		assert.Equal(t, "ok", ws["name"])
+		assert.Equal(t, redactedPlaceholder, ws["deep"].(map[string]any)["refresh_token"])
+
+		entry := out["history"].([]any)[0].(map[string]any)
+		assert.Equal(t, redactedPlaceholder, entry["api_key"])
+		assert.Equal(t, "u", entry["sub"])
+
+		// No reference to client-owned containers survives.
+		inner := in["workspace"].(map[string]any)
+		assert.Equal(t, "inner-secret", inner["access_token"], "input must be untouched")
+		inner["access_token"] = "mutated"
+		assert.Equal(t, redactedPlaceholder, out["workspace"].(map[string]any)["access_token"],
+			"nested maps must be deep copies, not shared references")
 	})
 
 	t.Run("input map untouched", func(t *testing.T) {

@@ -179,21 +179,32 @@ func RedactSensitiveHeaders(h http.Header) http.Header {
 
 // sensitiveTokenClaimFragments are case-insensitive key fragments of OAuth
 // claims that carry raw credentials. Identity/audit claims (sub, aud, iss,
-// scope, ...) are metadata and stay intact for dev introspection; only keys
-// that can smuggle a credential are redacted.
+// scope, client_id, ...) are metadata and stay intact for dev introspection;
+// only keys that can smuggle a credential (or values shaped like one) are
+// redacted.
 var sensitiveTokenClaimFragments = []string{
 	"token",
 	"secret",
 	"password",
 	"credential",
 	"authorization",
+	"jwt",
+	"api_key",
+	"apikey",
+	"key",
+	"signature",
+	"signing",
+	"cert",
+	"hash",
 }
 
 // RedactTokenClaims returns a copy of the token's arbitrary claims map with
 // credential-bearing entries replaced by a placeholder. Claim keys are
 // preserved (dev introspection legitimately reports which claims the client
 // presented) while values that look like raw credentials never reach
-// evidence, profiles, or dev-tool output. The input map is never mutated.
+// evidence, profiles, or dev-tool output. Nested maps and slices are copied
+// and redacted too, so no reference to client-owned data survives. The input
+// map is never mutated.
 //
 // A nil map returns nil.
 func RedactTokenClaims(extra map[string]any) map[string]any {
@@ -206,7 +217,7 @@ func RedactTokenClaims(extra map[string]any) map[string]any {
 			out[k] = redactedPlaceholder
 			continue
 		}
-		out[k] = v
+		out[k] = redactClaimValue(v)
 	}
 	return out
 }
@@ -221,6 +232,68 @@ func isSensitiveTokenClaim(key string) bool {
 		}
 	}
 	return false
+}
+
+// redactClaimValue copies v, recursing into nested maps and slices (clients
+// can nest credentials under innocuously-named claims) and redacting string
+// values shaped like raw credentials. It never returns a reference to a
+// caller-owned map or slice. Non-string scalars pass through by value.
+func redactClaimValue(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, inner := range v {
+			if isSensitiveTokenClaim(k) {
+				out[k] = redactedPlaceholder
+				continue
+			}
+			out[k] = redactClaimValue(inner)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, inner := range v {
+			out[i] = redactClaimValue(inner)
+		}
+		return out
+	case string:
+		if looksLikeCredential(v) {
+			return redactedPlaceholder
+		}
+		return v
+	default:
+		return v
+	}
+}
+
+// looksLikeCredential reports whether a string value is shaped like a raw
+// credential regardless of its claim name: a compact JWS/JWT (three dot-
+// separated base64url segments), a PEM block, or a long opaque base64url
+// token. Identity and audit values (sub, aud, scope, timestamps, short ids)
+// never match, so they pass through for dev introspection.
+func looksLikeCredential(s string) bool {
+	if strings.HasPrefix(s, "-----BEGIN") {
+		return true
+	}
+	if strings.Count(s, ".") == 2 && len(s) > 40 && strings.Trim(s, "._-") != "" {
+		// A JWS compact serialization: header.payload.signature in
+		// base64url, no other dot-delimited text this long.
+		for _, part := range s {
+			if part != '.' && !isBase64URLRune(part) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(s) >= 64 && strings.IndexFunc(s, func(r rune) bool { return !isBase64URLRune(r) }) == -1 {
+		return true
+	}
+	return false
+}
+
+// isBase64URLRune reports whether r is valid in base64url (RFC 4648 §5).
+func isBase64URLRune(r rune) bool {
+	return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '='
 }
 
 // isSensitiveHeader reports whether the header name carries a secret value.
@@ -264,6 +337,7 @@ func SharedProfileFromCore(p canimcp.Profile) model.Profile {
 			Extra:      RedactTokenClaims(p.TokenInfo.Extra),
 		}
 	}
+
 	features := make(model.FeatureSet, len(p.Features))
 	for f, ok := range p.Features {
 		features[model.Feature(f)] = ok
